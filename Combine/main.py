@@ -10,8 +10,11 @@ Usage
     python main.py --config config.json
 
     # OR pass paths directly:
-    python main.py \\
-        --dataset /path/to/dataset/uav/FLAME \
+    python ./Combine/main.py --dataset ./dataset/uav/FLAME --epochs 3
+
+    # PowerShell multiline example:
+    python ./Combine/main.py `
+        --dataset ./dataset/uav/FLAME `
         --epochs 3
 
 Config JSON format (alternative to CLI flags):
@@ -40,6 +43,8 @@ if hasattr(sys.stderr, "reconfigure"):
 # ---------------------------------------------------------------------------
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # ForestFireSurvey/
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 os.environ.setdefault("MPLCONFIGDIR", os.path.join(ROOT, ".matplotlib_cache"))
 os.environ.setdefault("TORCH_HOME", os.path.join(ROOT, ".torch_cache"))
 os.environ.setdefault("XDG_CACHE_HOME", os.path.join(ROOT, ".cache"))
