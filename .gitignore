@@ -1,2 +1,9 @@
 *.h5
 *.pt
+*.pth
+
+__pycache__/
+*.pyc
+.matplotlib_cache/
+
+dataset/
