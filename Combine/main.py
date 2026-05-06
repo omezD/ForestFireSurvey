@@ -122,12 +122,12 @@ def _build_registry(args) -> list:
             p("Uav", "forest_fire_mobilenet(Archit).py"),
             args.dataset,
         ),
-        (
-            "uav",
-            "deepfire_vgg19",
-            p("Uav", "uav_deepfire(himanshu).py"),
-            args.dataset,
-        ),
+        # (
+        #     "uav",
+        #     "deepfire_vgg19",
+        #     p("Uav", "uav_deepfire(himanshu).py"),
+        #     args.dataset,
+        # ),
     ]
 
     # Filter out entries where the file doesn't exist (graceful skip)

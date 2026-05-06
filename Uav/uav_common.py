@@ -35,12 +35,7 @@ def resolve_flame_dirs(dataset_root: str) -> Tuple[str, str]:
     if not root.exists():
         raise FileNotFoundError(f"Dataset root not found: {dataset_root}")
 
-    base_candidates = [
-        root,
-        root / "uav" / "FLAME",
-        root / "FLAME",
-        root / "dataset" / "uav" / "FLAME",
-    ]
+    base_candidates = [root]
     split_pairs = [
         ("Training", "Test"),
         ("Train", "Test"),

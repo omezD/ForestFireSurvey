@@ -453,6 +453,13 @@ def plot_confusion_matrix(labels, preds, save_dir, fire_label):
     print(f"Confusion matrix saved → {out}")
 
 
+def save_training_artifacts(history, labels, preds, metrics, save_dir, fire_label):
+    if history:
+        plot_training_curves(history, save_dir)
+    plot_confusion_matrix(labels, preds, save_dir, fire_label)
+    save_summary(metrics, save_dir)
+
+
 # ============================================================
 # RESULTS SUMMARY
 # ============================================================
@@ -528,12 +535,12 @@ def main():
     print(f"Trainable params : {n_train:,} (Phase 1, encoder frozen)")
 
     weights_path = os.path.join(save_dir, "fire_unet_classifier.pth")
+    history = None
 
     # ── 4. Train ───────────────────────────────────────────────
     if not args.no_train:
         history, weights_path = train(model, train_loader, val_loader,
                                       save_dir, class_weights, DEVICE)
-        plot_training_curves(history, save_dir)
     else:
         print("\n--no_train flag set. Skipping training.")
 
@@ -549,13 +556,10 @@ def main():
     test_metrics, preds, probs, labels = evaluate(model, test_loader, criterion, DEVICE)
 
     # ── 6. Save plots and summary ──────────────────────────────
-    plot_confusion_matrix(labels, preds, save_dir, fire_label)
-
     print("\n" + classification_report(
         labels, preds, target_names=['No Fire', 'Fire'], zero_division=0
     ))
-
-    save_summary(test_metrics, save_dir)
+    save_training_artifacts(history, labels, preds, test_metrics, save_dir, fire_label)
 
     return test_metrics
 
@@ -591,7 +595,9 @@ def run(dataset_path: str, epochs: int = None, output_dir: str = None) -> dict:
 
     model.load_state_dict(torch.load(weights_path, map_location=DEVICE))
     criterion = nn.BCELoss()
-    metrics, _, _, _ = evaluate(model, test_loader, criterion, DEVICE)
+    metrics, preds, _, labels = evaluate(model, test_loader, criterion, DEVICE)
+
+    save_training_artifacts(history, labels, preds, metrics, save_dir, fire_label)
 
     return {
         "model_name": "UAV-FireUNet",

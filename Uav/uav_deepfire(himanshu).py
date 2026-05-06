@@ -4,7 +4,8 @@ Converted from TensorFlow/Keras to PyTorch.
 Uses VGG19 Transfer Learning + traditional ML classifiers.
 """
 
-import os, argparse, cv2, numpy as np, pandas as pd, matplotlib.pyplot as plt, seaborn as sns
+import os, time, argparse, cv2, numpy as np, pandas as pd, matplotlib.pyplot as plt, seaborn as sns
+import time
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
@@ -53,7 +54,7 @@ def load_and_preprocess_data(data_dir: str, img_size=(128, 128), test_size=0.2):
             images.append(img)
             labels.append(label)
 
-    base_roots = [Path(data_dir), Path(data_dir) / 'uav' / 'FLAME', Path(data_dir) / 'FLAME']
+    base_roots = [Path(data_dir)]
     split_names = ['', 'Training', 'Train', 'Training and Validation', 'Testing', 'Test']
     fire_names = ['fire', 'Fire']
     nofire_names = ['nofire', 'No_Fire', 'NoFire', 'no_fire', 'non_fire', 'non_fire_images']
