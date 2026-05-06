@@ -38,6 +38,8 @@ from sklearn.metrics import (
     confusion_matrix, classification_report
 )
 
+from Uav.uav_common import model_results_dir, resolve_flame_dirs
+
 print("=" * 60)
 print("  UAV Fire Detection — U-Net Encoder + Classifier")
 print("  Framework : PyTorch", torch.__version__)
@@ -70,39 +72,10 @@ np.random.seed(SEED)
 
 def find_flame_dirs(dataset_root: str):
     """
-    Walks dataset_root to find Train/ and Test/ folders containing
+    Walks dataset_root to find Training/ or Train/ and Test/ folders containing
     Fire/ and No_Fire/ subfolders. Handles any nesting depth.
     """
-    root = Path(dataset_root)
-
-    # Try the expected path first
-    expected_train = root / "uav" / "FLAME" / "Train"
-    expected_test  = root / "uav" / "FLAME" / "Test"
-    if expected_train.exists() and expected_test.exists():
-        return str(expected_train), str(expected_test)
-
-    # Fallback: search recursively for Train/Fire and Test/Fire
-    train_dir, test_dir = None, None
-    for p in root.rglob("Train"):
-        if (p / "Fire").exists() and (p / "No_Fire").exists():
-            train_dir = str(p)
-            break
-    for p in root.rglob("Test"):
-        if (p / "Fire").exists() and (p / "No_Fire").exists():
-            test_dir = str(p)
-            break
-
-    if train_dir is None or test_dir is None:
-        raise FileNotFoundError(
-            f"\n[ERROR] Could not find FLAME Train/Test folders under: {dataset_root}\n"
-            f"Expected structure:\n"
-            f"  <dataset_root>/uav/FLAME/Train/Fire/\n"
-            f"  <dataset_root>/uav/FLAME/Train/No_Fire/\n"
-            f"  <dataset_root>/uav/FLAME/Test/Fire/\n"
-            f"  <dataset_root>/uav/FLAME/Test/No_Fire/\n"
-        )
-
-    return train_dir, test_dir
+    return resolve_flame_dirs(dataset_root)
 
 
 # ============================================================
@@ -518,6 +491,8 @@ def save_summary(metrics, save_dir):
 # ============================================================
 
 def main():
+    global EPOCHS, BATCH_SIZE
+
     parser = argparse.ArgumentParser(description="UAV Fire Detection — U-Net Encoder Classifier")
     parser.add_argument('--dataset',    type=str, required=True,
                         help='Root dataset directory (expects uav/FLAME/Train and Test inside)')
@@ -530,11 +505,10 @@ def main():
     args = parser.parse_args()
 
     # Override globals if user passed args
-    global EPOCHS, BATCH_SIZE
     EPOCHS     = args.epochs
     BATCH_SIZE = args.batch_size
 
-    save_dir = args.output
+    save_dir = args.output or str(model_results_dir("amit_uav_1"))
     os.makedirs(save_dir, exist_ok=True)
 
     # ── 1. Locate dataset ──────────────────────────────────────
@@ -592,23 +566,28 @@ def main():
 # run() — standard interface for main.py integration
 # ============================================================
 
-def run(dataset_path: str) -> dict:
+def run(dataset_path: str, epochs: int = None, output_dir: str = None) -> dict:
     """
     Standard pipeline interface called by main.py.
     dataset_path: root directory containing uav/FLAME/Train and Test.
     Returns a dict with model_name and metrics.
     """
+    global EPOCHS
+
     try:
         train_dir, test_dir = find_flame_dirs(dataset_path)
     except FileNotFoundError as e:
         return {"model_name": "UAV-FireUNet", "error": str(e), "metrics": None}
+
+    if epochs is not None:
+        EPOCHS = epochs
 
     train_loader, val_loader, test_loader, class_weights, fire_label = \
         build_dataloaders(train_dir, test_dir)
 
     model = FireUNetClassifier(pretrained=True, freeze_encoder=True).to(DEVICE)
 
-    save_dir = "./results/uav"
+    save_dir = output_dir or str(model_results_dir("amit_uav_1"))
     history, weights_path = train(model, train_loader, val_loader,
                                   save_dir, class_weights, DEVICE)
 

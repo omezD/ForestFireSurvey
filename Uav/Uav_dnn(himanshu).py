@@ -5,10 +5,13 @@ Replicates the custom CNN with Separable-Conv blocks, BN, Dropout.
 """
 
 import os, time, cv2, numpy as np, matplotlib.pyplot as plt, seaborn as sns
+from pathlib import Path
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import cohen_kappa_score, confusion_matrix, classification_report
 import torch, torch.nn as nn, torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
+
+from Uav.uav_common import model_results_dir, save_binary_confusion_matrix, save_binary_training_curves, save_results_summary
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -17,23 +20,39 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # DATA LOADING
 # =========================
 def load_data(data_dir, img_size=(250, 250)):
-    """Loads images from 'Testing' and 'Training and Validation' subdirs."""
+    """Loads images from FLAME or Mendeley-style split folders."""
     images, labels = [], []
 
     def load_specific(folder, label):
         if not os.path.exists(folder):
-            print(f"Warning: Folder {folder} not found."); return
+            return
         for fname in os.listdir(folder):
             if fname.lower().endswith(('.jpg', '.png', '.jpeg')):
                 img = cv2.imread(os.path.join(folder, fname))
                 if img is not None:
                     img = cv2.cvtColor(cv2.resize(img, img_size), cv2.COLOR_BGR2RGB)
-                    images.append(img); labels.append(label)
+                    images.append(img)
+                    labels.append(label)
 
-    load_specific(os.path.join(data_dir, 'Testing', 'fire'),   1)
-    load_specific(os.path.join(data_dir, 'Testing', 'nofire'), 0)
-    load_specific(os.path.join(data_dir, 'Training and Validation', 'fire'),   1)
-    load_specific(os.path.join(data_dir, 'Training and Validation', 'nofire'), 0)
+    base_roots = [Path(data_dir), Path(data_dir) / 'uav' / 'FLAME', Path(data_dir) / 'FLAME']
+    split_names = ['', 'Training', 'Train', 'Training and Validation', 'Testing', 'Test']
+    fire_names = ['fire', 'Fire']
+    no_fire_names = ['nofire', 'No_Fire', 'NoFire', 'no_fire', 'non_fire', 'non_fire_images']
+    seen = set()
+
+    for base in base_roots:
+        if not base.exists():
+            continue
+        for split_name in split_names:
+            split_dir = base if split_name == '' else base / split_name
+            split_key = str(split_dir.resolve())
+            if split_key in seen or not split_dir.exists():
+                continue
+            seen.add(split_key)
+            for folder_name in fire_names:
+                load_specific(str(split_dir / folder_name), 1)
+            for folder_name in no_fire_names:
+                load_specific(str(split_dir / folder_name), 0)
     return images, labels
 
 
@@ -125,24 +144,38 @@ def train_model(model, X_train, y_train, X_test, y_test,
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     best_acc, best_state = 0.0, None
     t0 = time.time()
-    history = {'accuracy': [], 'val_accuracy': []}
+    history = {'loss': [], 'accuracy': [], 'val_loss': [], 'val_accuracy': []}
 
     for ep in range(1, epochs + 1):
         model.train()
+        train_loss = 0.0
+        train_ok = 0
+        train_total = 0
         for imgs, lbls in train_loader:
             imgs, lbls = imgs.to(DEVICE), lbls.to(DEVICE)
             optimizer.zero_grad()
-            nn.CrossEntropyLoss()(model(imgs), lbls).backward()
+            logits = model(imgs)
+            loss = criterion(logits, lbls)
+            loss.backward()
             optimizer.step()
+            train_loss += loss.item() * lbls.size(0)
+            train_ok += (logits.argmax(1) == lbls).sum().item()
+            train_total += lbls.size(0)
 
         # Val accuracy
         model.eval(); correct = total = 0
+        val_loss = 0.0
         with torch.no_grad():
             for imgs, lbls in val_loader:
                 imgs, lbls = imgs.to(DEVICE), lbls.to(DEVICE)
-                preds = model(imgs).argmax(1)
+                logits = model(imgs)
+                preds = logits.argmax(1)
+                val_loss += criterion(logits, lbls).item() * lbls.size(0)
                 correct += (preds == lbls).sum().item(); total += lbls.size(0)
         acc = correct / total if total else 0.0
+        history['loss'].append(train_loss / train_total if train_total else 0.0)
+        history['accuracy'].append(train_ok / train_total if train_total else 0.0)
+        history['val_loss'].append(val_loss / total if total else 0.0)
         history['val_accuracy'].append(acc)
         if acc > best_acc:
             best_acc = acc; best_state = {k: v.clone() for k, v in model.state_dict().items()}
@@ -151,7 +184,7 @@ def train_model(model, X_train, y_train, X_test, y_test,
             print(f"Epoch {ep}/{epochs}  val_acc={acc:.4f}")
 
     print(f"Training Time: {time.time()-t0:.2f}s")
-    return history
+    return model, history
 
 
 # =========================
@@ -211,7 +244,7 @@ def main():
     perform_inference('best_model.pth', X_test[0:1])
 
 
-def run(dataset_path, epochs=150):
+def run(dataset_path, epochs=150, output_dir=None):
     """Standard pipeline interface. dataset_path: Mendeley-style dir."""
     from sklearn.metrics import roc_auc_score, average_precision_score
     if not os.path.exists(dataset_path):
@@ -225,8 +258,10 @@ def run(dataset_path, epochs=150):
     X_train, X_test, y_train, y_test = train_test_split(X_norm, y_cat, test_size=0.20, random_state=42, stratify=y_cat)
 
     model = build_model()
-    save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uav_dnn_best.pth')
-    train_model(model, X_train, y_train, X_test, y_test, epochs=epochs, batch_size=32, save_path=save_path)
+    save_dir = output_dir or str(model_results_dir('uav_dnn'))
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, 'uav_dnn_best.pth')
+    model, history = train_model(model, X_train, y_train, X_test, y_test, epochs=epochs, batch_size=32, save_path=save_path)
 
     best_model = build_model()
     best_model.load_state_dict(torch.load(save_path, map_location=DEVICE))
@@ -246,12 +281,21 @@ def run(dataset_path, epochs=150):
     total = tp+tn+fp+fn
     acc  = (tp+tn)/total if total>0 else 0.0; prec = tp/(tp+fp) if (tp+fp)>0 else 0.0
     rec  = tp/(tp+fn) if (tp+fn)>0 else 0.0;  f1   = 2*prec*rec/(prec+rec) if (prec+rec)>0 else 0.0
+    has_both = len(np.unique(y_true_cls)) > 1
+    metrics = {
+        "accuracy": float(acc),
+        "precision": float(prec),
+        "recall": float(rec),
+        "f1": float(f1),
+        "auc": float(roc_auc_score(y_true_cls, proba[:,1])) if has_both else None,
+        "aupr": float(average_precision_score(y_true_cls, proba[:,1])) if has_both else None,
+    }
 
-    return {"model_name": "UAV-DNN", "metrics": {
-        "accuracy": float(acc), "precision": float(prec), "recall": float(rec), "f1": float(f1),
-        "auc":  float(roc_auc_score(y_true_cls, proba[:,1])),
-        "aupr": float(average_precision_score(y_true_cls, proba[:,1])),
-    }}
+    save_binary_training_curves(history, os.path.join(save_dir, 'training_curves.png'), 'UAV DNN Training History')
+    save_binary_confusion_matrix(y_true_cls, y_pred_cls, os.path.join(save_dir, 'confusion_matrix.png'), 'UAV DNN Confusion Matrix')
+    save_results_summary(os.path.join(save_dir, 'results_summary.txt'), 'UAV DNN Final Test Results', metrics)
+
+    return {"model_name": "UAV-DNN", "metrics": metrics}
 
 
 if __name__ == '__main__':

@@ -4,9 +4,12 @@ Converted from TensorFlow/Keras to PyTorch.
 """
 
 import os, cv2, numpy as np, argparse
+from pathlib import Path
 import torch, torch.nn as nn, torchvision.models as models, torchvision.transforms as T
 from torch.utils.data import DataLoader, Dataset
 from PIL import Image as PILImage
+
+from Uav.uav_common import model_results_dir, save_binary_confusion_matrix, save_binary_training_curves, save_results_summary
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 IMG_SIZE = (224, 224)
@@ -17,21 +20,24 @@ IMG_SIZE = (224, 224)
 # =========================
 class FireFolderDataset(Dataset):
     """Loads images from dataset_dir/{fire,non_fire_images}/ folders."""
-    CLASSES = ['fire', 'non_fire_images']
+    CLASS_ALIASES = [
+        ('fire', ['fire', 'Fire']),
+        ('non_fire_images', ['non_fire_images', 'No_Fire', 'NoFire', 'nofire', 'no_fire', 'non_fire']),
+    ]
 
     def __init__(self, dataset_dir, transform=None, split='train', val_fraction=0.2):
         self.transform = transform
         self.samples   = []
         rng = np.random.RandomState(42)
-        for cls_idx, cls_name in enumerate(self.CLASSES):
-            folder_names = [cls_name]
-            if cls_name == 'non_fire_images':
-                folder_names += ['nofire', 'non_fire', 'no_fire']
+        for cls_idx, (_, folder_names) in enumerate(self.CLASS_ALIASES):
             files = []
             for folder_name in folder_names:
                 candidates = [
                     os.path.join(dataset_dir, folder_name),
+                    os.path.join(dataset_dir, 'Train', folder_name),
+                    os.path.join(dataset_dir, 'Training', folder_name),
                     os.path.join(dataset_dir, 'Testing', folder_name),
+                    os.path.join(dataset_dir, 'Test', folder_name),
                     os.path.join(dataset_dir, 'Training and Validation', folder_name),
                 ]
                 for folder in candidates:
@@ -101,23 +107,38 @@ def train_model(model, train_loader, val_loader, epochs=30, save_path='./fire_mo
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-3)
     best_acc, best_state = 0.0, None
+    history = {'loss': [], 'val_loss': [], 'accuracy': [], 'val_accuracy': []}
 
     for epoch in range(1, epochs + 1):
         model.train()
+        train_loss = 0.0
+        train_ok = 0
+        train_total = 0
         for imgs, lbls in train_loader:
             imgs, lbls = imgs.to(DEVICE), lbls.to(DEVICE)
             optimizer.zero_grad()
-            loss = criterion(model(imgs), lbls)
+            logits = model(imgs)
+            loss = criterion(logits, lbls)
             loss.backward(); optimizer.step()
+            train_loss += loss.item() * lbls.size(0)
+            train_ok += (logits.argmax(1) == lbls).sum().item()
+            train_total += lbls.size(0)
 
         # Validation
         model.eval(); correct = total = 0
+        val_loss = 0.0
         with torch.no_grad():
             for imgs, lbls in val_loader:
                 imgs, lbls = imgs.to(DEVICE), lbls.to(DEVICE)
-                preds = model(imgs).argmax(1)
+                logits = model(imgs)
+                preds = logits.argmax(1)
+                val_loss += criterion(logits, lbls).item() * lbls.size(0)
                 correct += (preds == lbls).sum().item(); total += lbls.size(0)
         acc = correct / total if total > 0 else 0
+        history['loss'].append(train_loss / train_total if train_total else 0.0)
+        history['accuracy'].append(train_ok / train_total if train_total else 0.0)
+        history['val_loss'].append(val_loss / total if total else 0.0)
+        history['val_accuracy'].append(acc)
         print(f"Epoch {epoch}/{epochs}  val_acc={acc:.4f}")
         if acc > best_acc:
             best_acc = acc; best_state = {k: v.clone() for k, v in model.state_dict().items()}
@@ -126,7 +147,7 @@ def train_model(model, train_loader, val_loader, epochs=30, save_path='./fire_mo
         model.load_state_dict(best_state)
         torch.save(best_state, save_path)
         print(f"Model saved to {save_path}")
-    return model
+    return model, history
 
 
 def run_inference(model_path, test_dir):
@@ -171,7 +192,7 @@ def main():
         run_inference(args.model_path, args.test_dir)
 
 
-def run(dataset_path, epochs=30):
+def run(dataset_path, epochs=30, output_dir=None):
     """Standard pipeline interface. dataset_path: dir with 'fire/' and 'non_fire_images/' sub-folders."""
     from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, average_precision_score
     if not os.path.exists(dataset_path):
@@ -182,8 +203,10 @@ def run(dataset_path, epochs=30):
         train_loader = DataLoader(train_ds, 32, shuffle=True,  num_workers=0)
         val_loader   = DataLoader(val_ds,   32, shuffle=False, num_workers=0)
         model = build_model()
-        save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mobilenet_fire.pth')
-        train_model(model, train_loader, val_loader, epochs, save_path)
+        save_dir = output_dir or str(model_results_dir('mobilenet_uav'))
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, 'mobilenet_fire.pth')
+        model, history = train_model(model, train_loader, val_loader, epochs, save_path)
 
         model.eval()
         y_score_raw, y_true_raw = [], []
@@ -199,15 +222,20 @@ def run(dataset_path, epochs=30):
         y_score_fire = y_score_raw
         y_pred   = (y_score_fire >= 0.5).astype(int)
         has_both = len(np.unique(y_true_bin)) > 1
-
-        return {"model_name": "MobileNetV2-UAV", "metrics": {
+        metrics = {
             "accuracy":  float(accuracy_score(y_true_bin, y_pred)),
             "precision": float(precision_score(y_true_bin, y_pred, zero_division=0)),
             "recall":    float(recall_score(y_true_bin, y_pred, zero_division=0)),
             "f1":        float(f1_score(y_true_bin, y_pred, zero_division=0)),
-            "auc":       float(roc_auc_score(y_true_bin, y_score_fire))       if has_both else None,
+            "auc":       float(roc_auc_score(y_true_bin, y_score_fire)) if has_both else None,
             "aupr":      float(average_precision_score(y_true_bin, y_score_fire)) if has_both else None,
-        }}
+        }
+
+        save_binary_training_curves(history, os.path.join(save_dir, 'training_curves.png'), 'MobileNetV2 UAV Training History')
+        save_binary_confusion_matrix(y_true_bin, y_pred, os.path.join(save_dir, 'confusion_matrix.png'), 'MobileNetV2 UAV Confusion Matrix')
+        save_results_summary(os.path.join(save_dir, 'results_summary.txt'), 'MobileNetV2 UAV Final Test Results', metrics)
+
+        return {"model_name": "MobileNetV2-UAV", "metrics": metrics}
     except Exception as exc:
         return {"model_name": "MobileNetV2-UAV", "error": str(exc), "metrics": None}
 
